@@ -896,17 +896,15 @@ int adcStart(int argc, char *inChannel, char *inGain, char *inRate)
     return 0;
 }
 
-long int readChannels(long int *valorCanal){
+long int readChannels(long int *outValues){
     int i;
-    uint32_t adc[8];
+
+	//Wait for the ADC to finish sampling
+	while((ADS1256_Scan() == 0));
 
 	for (i = 0; i < 8; i++)
 	{
-        while((ADS1256_Scan() == 0));
-
-        adc[i] = ADS1256_GetAdc(i);
-        valorCanal[i]=  (long)adc[i]; 
-        bsp_DelayUS(1);	
+        outValues[i] = ADS1256_GetAdc(i);
 	}
     return 0;
 }
