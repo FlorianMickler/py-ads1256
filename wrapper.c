@@ -1,49 +1,46 @@
 #include <Python.h>
 #include "wrapper.h"
+#include "logging.h"
 
 /* Docstrings */
-static char module_docstring[] =
-    "Esta biblioteca é um wrapper ";
+//static char module_docstring[] =
+//    "Esta biblioteca é um wrapper ";
 
 /* Available functions */
 static PyObject *adc_read_channel(PyObject *self, PyObject *args);
 static PyObject *adc_read_all_channels(PyObject *self, PyObject *args);
 static PyObject *adc_start(PyObject *self, PyObject *args);
 static PyObject *adc_stop(PyObject *self, PyObject *args);
+static PyObject *adc_test(PyObject *self, PyObject *args);
 
 /* Module specification */
 static PyMethodDef module_methods[] = {
  //   {"chi2", chi2_chi2, METH_VARARGS, chi2_docstring},
-    {"read_channel", adc_read_channel, METH_VARARGS, {"lê o canal especificado do ads1256"}},
-    {"read_all_channels", adc_read_all_channels, METH_VARARGS, {"lê todos os 8 canais do ads1256"}},
-    {"start", adc_start, METH_VARARGS, {"inicia e configura o ads1256"}},
-    {"stop", adc_stop, 0, {"termina e fecha o ads1256"}},
+    {"read_channel", adc_read_channel, METH_VARARGS, "Read a channel"},
+    {"read_all_channels", adc_read_all_channels, METH_VARARGS, "Read all channels"},
+    {"start", adc_start, METH_VARARGS, "Start ads1256 acquisition"},
+    {"stop", adc_stop, 0, "Stop ads1256"},
+	{"test", adc_test, 0, ""},
     {NULL, NULL, 0, NULL}
 };
 
 /* Initialize the module */
-PyMODINIT_FUNC initads1256(void)
+DL_EXPORT(void) initads1256(void)
 {
-    PyObject *m = Py_InitModule3("ads1256", module_methods, module_docstring);
-    if (m == NULL)
-        return;
-
+    Py_InitModule("ads1256", module_methods);
 }
+
 static PyObject *adc_start(PyObject *self, PyObject *args)
 {
-
-    char * ganho, *sps;
-    PyObject *yerr_obj;
-    double v[8];
-    int value ;
-                                         
+    char *gain, *rate;
+    int value;
 
     /* Parse the input tuple */
-    if (!PyArg_ParseTuple(args, "ss", &ganho, &sps,&yerr_obj))
+    if (!PyArg_ParseTuple(args, "ss", &gain, &rate))
         return NULL;
-
+	
     /* execute the code */ 
-    value = adcStart(4,"0",ganho,sps);
+    value = adcStart(4,"0", gain, rate);
 
     /* Build the output tuple */
     PyObject *ret = Py_BuildValue("i",value);
@@ -72,7 +69,7 @@ static PyObject *adc_read_channel(PyObject *self, PyObject *args)
 
 static PyObject *adc_read_all_channels(PyObject *self, PyObject *args)
 {
-    PyObject *yerr_obj;
+    //PyObject *yerr_obj;
     long int v[8];
                                          
 
@@ -103,4 +100,9 @@ static PyObject *adc_stop(PyObject *self, PyObject *args)
     return ret;
 }
 
+static PyObject *adc_test(PyObject *self, PyObject *args)
+{
+	lib_log("TEST");
+	return NULL;
+}
 
