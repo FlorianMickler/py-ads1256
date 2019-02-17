@@ -198,11 +198,6 @@ static const uint8_t s_tabDataRate[ADS1256_DRATE_MAX] =
 };
 
 
-
-
-
-
-
 void  bsp_DelayUS(uint64_t micros);
 void ADS1256_StartScan(uint8_t _ucScanMode);
 static void ADS1256_Send8Bit(uint8_t _data);
@@ -651,7 +646,7 @@ static int32_t ADS1256_ReadData(void)
     read |= ((uint32_t)buf[1] << 8);  /* Pay attention to It is wrong   read |= (buf[1] << 8) */
     read |= buf[2];
 
-	CS_1();	/* SPIƬѡ = 1 */
+	CS_1();	/* SPI cs = 1 */
 
 	/* Extend a signed number*/
     if (read & 0x800000)
@@ -802,6 +797,137 @@ uint16_t Voltage_Convert(float Vref, float voltage)
 	return _D_;
 }
 
+
+#define ADS1256_ADC_CHANNELS 8
+
+//Delay from last SCLK edge for DIN to first SCLK rising edge for DOUT: RDATA, RDATAC,RREG Commands
+//min  50   CLK = 50 * 0.13uS = 6.5uS
+#define DELAY_T6()	bsp_DelayUS(10)	/* The minimum time delay 6.5us */
+//Final SCLK falling edge of command to first SCLK rising edge of next command.
+//RREG, WREG, RDATA 4
+//CLK = 4 * 0.13uS = 0.52uS
+#define DELAY_T11_RREG_WREG_RDATA() bsp_DelayUS(1)
+//RDATAC, SYNC 24
+//CLK = 24 * 0.13uS = 3.12
+#define DELAY_T11_RDATAC_SYNC() bsp_DelayUS(4)
+//RDATAC, RESET, STANDBY, SELFOCAL, SYSOCAL, SELFGCAL, SYSGCAL, SELFCAL need to wait DRDY_IS_LOW
+
+#define ADS1256_K_Receive8Bit()		bcm2835_spi_transfer(0xff)
+#define ADS1256_K_Send8Bit(_data)	bcm2835_spi_transfer(_data)
+static void ADS1256_K_WriteReg(uint8_t _RegID, uint8_t _RegValue);
+
+void ADS1256_K_ChannelSwitch(uint8_t id, bool enabled);
+void ADS1256_K_ReadChannels(void);
+uint32_t ADS1256_K_ReadChannel(uint8_t channel);
+
+typedef struct _ads1256 {
+	uint8_t STATUS 	; //x1H ID3 ID2 ID1 ID0 ORDER ACAL BUFEN DRDY 
+	uint8_t MUX 	; //01H PSEL3 PSEL2 PSEL1 PSEL0 NSEL3 NSEL2 NSEL1 NSEL0
+	uint8_t ADCON 	; //20H 0 CLK1 CLK0 SDCS1 SDCS0 PGA2 PGA1 PGA0 
+	uint8_t DRATE 	; //F0H DR7 DR6 DR5 DR4 DR3 DR2 DR1 DR0 
+	uint8_t IO 		; //E0H DIR3 DIR2 DIR1 DIR0 DIO3 DIO2 DIO1 DIO0 
+	uint8_t OFC0 	; //xxH OFC07 OFC06 OFC05 OFC04 OFC03 OFC02 OFC01 OFC00 
+	uint8_t OFC1 	; //xxH OFC15 OFC14 OFC13 OFC12 OFC11 OFC10 OFC09 OFC08 
+	uint8_t OFC2 	; //xxH OFC23 OFC22 OFC21 OFC20 OFC19 OFC18 OFC17 OFC16 
+	uint8_t FSC0 	; //xxH FSC07 FSC06 FSC05 FSC04 FSC03 FSC02 FSC01 FSC00 
+	uint8_t FSC1 	; //xxH FSC15 FSC14 FSC13 FSC12 FSC11 FSC10 FSC09 FSC08 
+	uint8_t FSC2 	; //xxH FSC23 FSC22 FSC21 FSC20 FSC19 FSC18 FSC17 FSC16
+} t_ads1256;
+
+typedef struct _adc_channel {
+	uint8_t enabled;
+	uint32_t value;
+} t_adc_channel;
+
+static t_adc_channel _ads1256_ADC[ADS1256_ADC_CHANNELS] = { 0 };
+
+static void ADS1256_K_WriteReg(uint8_t _RegID, uint8_t _RegValue)
+{
+	ADS1256_Send8Bit(CMD_WREG | _RegID);	/*Write command register */
+	ADS1256_Send8Bit(0x00);		/*Write the register number */
+
+	ADS1256_Send8Bit(_RegValue);	/*send register value */
+}
+
+
+void ADS1256_K_ChannelSwitch(uint8_t id, bool enabled) 
+{
+	_ads1256_ADC[id].enabled = enabled;
+}
+
+void ADS1256_K_ReadChannels(void) 
+{
+	uint8_t i;
+	uint8_t previous = 0; //First value needs to be discarded
+	
+	for(i = 0; i < ADS1256_ADC_CHANNELS; ++i) {
+		//Check if we need to query the chip for this channel
+		if(_ads1256_ADC[i].enabled) {
+			//Retrieve single value
+			_ads1256_ADC[previous].value = ADS1256_K_ReadChannel(i);
+			
+			previous = i;
+		}
+	}
+	
+	//Read last value and set next read to be any value (we chose 0)
+	_ads1256_ADC[previous].value = ADS1256_K_ReadChannel(0);
+}
+
+
+//Since this function is optimized, the returned value will be for the previous command
+//Check http://www.ti.com/lit/ds/sbas288k/sbas288k.pdf page21 Figure19
+// Cycling the ADS1256 Input Multiplexer
+uint32_t ADS1256_K_ReadChannel(uint8_t channel)
+{
+	uint32_t read;
+	uint8_t buf[3];
+	
+	//Wait to DRDY to go lowvideo
+	while(!DRDY_IS_LOW());
+
+	CS_0();	/* SPI  cs  = 0 */
+
+	//Select the channel to read
+	ADS1256_K_WriteReg(REG_MUX, (channel << 4) | (1 << 3));
+	
+	//Send Synchronize
+	ADS1256_K_Send8Bit(CMD_SYNC);
+	
+	DELAY_T11_RDATAC_SYNC();
+	
+	//Send Wakeup
+	ADS1256_K_Send8Bit(CMD_WAKEUP);
+	
+	//Start read data
+	ADS1256_K_Send8Bit(CMD_RDATA);	/* read ADC command  */
+
+	//Wait between RDATA and Output start
+	DELAY_T6();
+	
+	/*Read the sample results 24bit*/
+    buf[0] = ADS1256_K_Receive8Bit();
+    buf[1] = ADS1256_K_Receive8Bit();
+    buf[2] = ADS1256_K_Receive8Bit();
+
+	DELAY_T11_RREG_WREG_RDATA();
+	
+	CS_1();	/* SPI   cs = 1 */
+	
+	//Compute value
+	read = ((uint32_t)buf[0] << 16) & 0x00FF0000;
+	read |= ((uint32_t)buf[1] << 8);  /* Pay attention to It is wrong   read |= (buf[1] << 8) */
+	read |= buf[2];
+
+	/* Extend a signed number*/
+	if (read & 0x800000)
+	{
+		read |= 0xFF000000;
+	}
+	return read;
+}
+
+
 /*
 *********************************************************************************************************
 *	name: main
@@ -814,12 +940,12 @@ uint16_t Voltage_Convert(float Vref, float voltage)
 int adcStart(int argc, char *inChannel, char *inGain, char *inRate)
 {
 	uint8_t id;
-	int32_t adc[8];
-	int32_t volt[8];
-	uint8_t i;
-	uint8_t ch_num;
-	int32_t iTemp;
-	uint8_t buf[3];
+	//int32_t adc[8];
+	//int32_t volt[8];
+	//uint8_t i;
+	//uint8_t ch_num;
+	//int32_t iTemp;
+	//uint8_t buf[3];
 	
 		
 	lib_log("ADCSTART called.");
@@ -853,62 +979,28 @@ int adcStart(int argc, char *inChannel, char *inGain, char *inRate)
 		lib_log("Ok, ASD1256 Chip ID = 0x%d\r\n", (int)id);
 	}
 	
-	ADS1256_CfgADC(ADS1256_GAIN_1, ADS1256_2000SPS);
-    ADS1256_StartScan(0);
-	//ch_num = 8;	
-	
-	//while(1)
-	//{
-	//	//Wait for ADC to be ready
-	//	while((ADS1256_Scan() == 0));
-	//	
-	//	for (i = 0; i < ch_num; i++)
-	//	{
-	//		adc[i] = ADS1256_GetAdc(i);
-	//		volt[i] = (adc[i] * 100) / 167;	
-	//	}
-	//	
-	//	for (i = 0; i < ch_num; i++)
-	//	{
-	//		buf[0] = ((uint32_t)adc[i] >> 16) & 0xFF;
-	//		buf[1] = ((uint32_t)adc[i] >> 8) & 0xFF;
-	//		buf[2] = ((uint32_t)adc[i] >> 0) & 0xFF;
-	//		lib_log("%d=%02X%02X%02X, %8ld", (int)i, (int)buf[0], (int)buf[1], (int)buf[2], (long)adc[i]);
-	//	
-	//		iTemp = volt[i];	/* uV  */
-	//		if (iTemp < 0)
-	//		{
-	//			iTemp = -iTemp;
-	//			lib_log(" (-%ld.%03ld %03ld V) \r\n", iTemp /1000000, (iTemp%1000000)/1000, iTemp%1000);
-	//		}
-	//		else
-	//		{
-	//			lib_log(" ( %ld.%03ld %03ld V) \r\n", iTemp /1000000, (iTemp%1000000)/1000, iTemp%1000);                    
-	//		}
-	//	}
-	//	lib_log("\33[%dA", (int)ch_num);  
-    //
-	//	bsp_DelayUS(100000);	
-	//}
-    //bcm2835_spi_end();
-    //bcm2835_close();
+	ADS1256_CfgADC(ADS1256_GAIN_1, ADS1256_3750SPS);
+
+	//Enable channels
+	ADS1256_K_ChannelSwitch(2, TRUE);
+	ADS1256_K_ChannelSwitch(3, TRUE);
 	
     return 0;
 }
 
 long int readChannels(long int *outValues){
-    int i;
+	int i;
+	//NOTE: This function is 3x faster than the original one
+	//Reading 2 channels = 1.3ms instead of 3.8ms @3750SPS
+	
+	ADS1256_K_ReadChannels();
 
-	//Wait for the ADC to finish sampling
-	while((ADS1256_Scan() == 0));
-
-	for (i = 0; i < 8; i++)
+	for (i = 0; i < ADS1256_ADC_CHANNELS; i++)
 	{
-        outValues[i] = ADS1256_GetAdc(i);
+        outValues[i] = _ads1256_ADC[i].value;
 	}
-    return 0;
+	return 0;
 }
-
 
 long int readChannel(long int ch)
 {
